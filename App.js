@@ -1,7 +1,8 @@
 import React, { Component } from 'react';
 import { AppRegistry, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import { Camera, Permissions } from 'expo';
-import { Button, Image } from 'react-native';
+import { Camera, Permissions, FaceDetector } from 'expo';
+import { Button, Image, Linking } from 'react-native';
+import { email, ACCESS_TOKEN, ACCESS_ID, REG_ID } from './config.js';
 
 export default class App extends Component {
   state = {
@@ -10,6 +11,10 @@ export default class App extends Component {
     hasFood: false,
     data: {},
     stage: 0,
+    hasPaid: false,
+    notified: false,
+    referenceNumber: "",
+    requestID: "",
   };
 
   async componentDidMount() {
@@ -17,7 +22,106 @@ export default class App extends Component {
     this.setState({ hasCameraPermission: status === 'granted' });
   }
 
+  uuid = () => {
+    let dt = new Date().getTime();
+    let uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+        let r = (dt + Math.random()*16)%16 | 0;
+        dt = Math.floor(dt/16);
+        return (c=='x' ? r :(r&0x3|0x8)).toString(16);
+    });
+    return uuid;
+  }
+
   buyFood = () => {
+    if (!this.state.notified) {
+      let uuid = this.uuid();
+      fetch('https://gateway-web.beta.interac.ca/publicapi/api/v2/money-requests/send', {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'accessToken': "Bearer " + ACCESS_TOKEN,
+          'thirdPartyAccessId': ACCESS_ID,
+          'requestId': uuid,
+          'deviceId': uuid,
+          'apiRegistrationId': REG_ID
+        },
+        body: JSON.stringify({
+          "sourceMoneyRequestId": Math.random().toString(36).replace(/[^a-z]+/g, '').substr(0, 5),
+          "requestedFrom": {
+            "contactId": "CAsyJjfTFfMn",
+            "contactHash": "fd805650e4295158450591b511c8cdeb",
+            "contactName": "Arri Ye",
+            "language": "en",
+            "notificationPreferences": [
+              {
+                "handle": email,
+                "handleType": "email",
+                "active": true
+              }
+            ]
+          },
+          "amount": this.state.data.price || 10,
+          "currency": "CAD",
+          "editableFulfillAmount": false,
+          "requesterMessage": "Fill Up Your Wallet to Enjoy Some Food :)",
+          "invoice": {
+            "invoiceNumber": "123",
+            "dueDate": "2019-02-19T04:59:59.760Z"
+          },
+          "expiryDate": "2019-02-19T04:59:59.760Z",
+          "supressResponderNotifications": true,
+          "returnURL": "string"
+        }),
+      })
+      .then((response) => response.json())
+      .then((responseJson) => {
+        console.log(responseJson);
+        this.setState({
+          ...this.state,
+          referenceNumber: responseJson.referenceNumber,
+          requestID: uuid,
+          notified: true
+        });
+        Linking.openURL(responseJson.paymentGatewayUrl);
+      })
+      .catch((error) => {
+        console.error(error);
+      });
+    } else if (!this.state.hasPaid) {
+      fetch('https://gateway-web.beta.interac.ca/publicapi/api/v2/money-requests/send?fromDate=2019-01-19T20:37:58.674Z&toDate=2019-06-19T06:59:36.252Z', {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'accessToken': "Bearer " + ACCESS_TOKEN,
+          'thirdPartyAccessId': ACCESS_ID,
+          'requestId': this.state.uuid,
+          'deviceId': this.state.uuid,
+          'apiRegistrationId': REG_ID
+        },
+      })
+      .then((response) => response.json())
+      .then((responseJson) => {
+        console.log(responseJson);
+        if (responseJson[0].status == 8) {
+          this.setState({
+            ...this.state,
+            hasPaid: true
+          });
+          this.loadFood();
+        }
+      })
+      .catch((error) => {
+        console.error(error);
+      });
+    } else {
+      this.loadFood();
+    }
+    return;
+  }
+
+  loadFood = () => {
     fetch('https://music-mind.lib.id/food@dev/')
       .then((response) => response.json())
       .then((responseJson) => {
@@ -32,7 +136,7 @@ export default class App extends Component {
       .catch((error) => {
         console.error(error);
       });
-    return;
+      return;
   }
 
   eatFood = () => {
@@ -51,12 +155,17 @@ export default class App extends Component {
     return;
   }
 
-  // https://music-mind.lib.id/food@dev/
+  handleFacesDetected = (data) => {
+    console.log(data);
+    if (data.faces.length && data.faces[0].smilingProbability && data.faces[0].smilingProbability > 0.08) {
+      this.eatFood();
+    }
+  }
 
   render() {
     const { hasCameraPermission, hasFood, data, stage } = this.state;
 
-    let centerItem = hasFood ? <Image source={{uri: data.src[stage]}} style={{ width: 600, height: 600 }} /> : <View />;
+    let centerItem = hasFood ? <TouchableOpacity onPress={this.eatFood}><Image source={{uri: data.src[stage]}} style={{ width: 600, height: 600 }} /></TouchableOpacity> : <View />;
 
     if (hasCameraPermission === null) {
       return <View />;
@@ -65,8 +174,16 @@ export default class App extends Component {
     } else {
       return (
         <View style={{ flex: 1 }}>
-          <Camera style={{ flex: 1, justifyContent: 'flex-start'}} type={this.state.type}>
+          <Camera style={{ flex: 1, justifyContent: 'flex-start'}} type={this.state.type} onFacesDetected={this.handleFacesDetected}
+            faceDetectorSettings={{
+              mode: FaceDetector.Constants.Mode.fast,
+              detectLandmarks: FaceDetector.Constants.Landmarks.none,
+              runClassifications: FaceDetector.Constants.Classifications.all,
+            }}>
             <View style={{top: 50, right: -100, position: 'absolute', backgroundColor: 'transparent', justifyContent: 'center', alignItems: 'center'}} >{centerItem}</View>
+              <TouchableOpacity style={{top: 25, left: 175, backgroundColor: 'transparent'}}>
+                <Text style={{fontSize: 18, color: 'white'}}>{"Hung.ar"}</Text>
+              </TouchableOpacity>
             <View
               style={{
                 flex: 1,
@@ -79,6 +196,7 @@ export default class App extends Component {
                   flex: 0.1,
                   alignSelf: 'flex-end',
                   alignItems: 'center',
+                  margin: 10
                 }}
                 onPress={() => {
                   this.setState({
@@ -97,6 +215,7 @@ export default class App extends Component {
                   flex: 0.1,
                   alignSelf: 'flex-end',
                   alignItems: 'center',
+                  margin: 10
                 }}
                 onPress={this.buyFood}>
                 <Text
@@ -109,6 +228,7 @@ export default class App extends Component {
                   flex: 0.1,
                   alignSelf: 'flex-end',
                   alignItems: 'center',
+                  margin: 10
                 }}
                 onPress={this.eatFood}>
                 <Text
